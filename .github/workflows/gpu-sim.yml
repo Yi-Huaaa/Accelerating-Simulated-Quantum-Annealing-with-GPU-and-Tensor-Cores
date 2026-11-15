@@ -1,0 +1,59 @@
+name: CUDA tests (simulated H100)
+
+# The hosted runners have no GPU. This builds the solver for compute_90 (PTX)
+# and runs tests/run_tests.sh on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Makefile'
+      - '.github/workflows/gpu-sim.yml'
+
+concurrency:
+  group: gpu-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-sim:
+    name: make test on a simulated H100
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@656f502ef4782d94d34d8ddd368e333960609639 # v0.1.8
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+
+      # The simulator runs PTX (not SASS) and needs a shared CUDA runtime.
+      - name: Build
+        run: make ARCH=compute_90 NVCCFLAGS="-O3 -std=c++17 -lineinfo -cudart shared"
+
+      # The solver exits with an error when there is no CUDA device, so the
+      # tests cannot pass without one. This also checks that the simulated
+      # H100 is the device in use and that the tensor-core path is selected.
+      - name: Check the device
+        run: |
+          set -euo pipefail
+          printf '4 4\n1 2 1\n2 3 1\n3 4 1\n4 1 1\n' > /tmp/c4
+          vgpu run build/sqa --check --runs 1 /tmp/c4 | tee device.log
+          grep -q '^device *: NVIDIA H100' device.log
+          grep -q '^tensor cores : on' device.log
+          grep -q '^field check  : PASSED' device.log
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          vgpu run make test ARCH=compute_90 2>&1 | tee test.log
+          grep -q ' 0 failed' test.log
